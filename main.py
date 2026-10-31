@@ -251,6 +251,8 @@ class 消息补获(Star):
                 片段收集.extend(片段)
                 if not 需要继续:
                     break
+                if 最大循环时间 == -1:
+                    continue
                 if time.time() - 开始时间 > 最大循环时间:
                     break
         finally:
