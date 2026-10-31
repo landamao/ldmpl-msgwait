@@ -38,6 +38,8 @@ class 消息补获(Star):
         self.会话等待中事件:dict[str, AstrMessageEvent | None] = {}
         self.会话锁: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.会话有新唤醒:dict[str, bool] = {}
+        self.同用户循环等待 = bool(config['同用户循环等待'])
+        self.循环等待最大时间 = float(config['循环等待最大时间'])
 
     def 编译正则(self):
         """预编译正则列表"""
@@ -75,6 +77,8 @@ class 消息补获(Star):
     @filter.on_waiting_llm_request()
     async def llm队列时(self, event: AstrMessageEvent):
         """进入llm请求队列时，检查是否在等待"""
+        if not event.get_group_id():
+            return
         umo = event.unified_msg_origin
         if w_event:=self.会话等待中事件.get(umo):
             if w_event.get_sender_id() == event.get_sender_id():
@@ -88,6 +92,8 @@ class 消息补获(Star):
     @filter.on_llm_request()
     async def llm请求前(self, event: AstrMessageEvent, req: ProviderRequest):
         """即将请求llm时，检查是否需要等待"""
+        if not event.get_group_id():
+            return
 
         # 理论上此时不会再有正在等待中的同会话的事件，因为llm请求前的事件，已经在事件线上了，
         # 已经从llm队列时取出来了了，如果是另一个会话的，那么此方法会照常同时触发两个会话的等待，互不影响
@@ -108,7 +114,10 @@ class 消息补获(Star):
         else:
             return
         # 触发等待
-        片段 = await self.等待收集新消息(event, 等待秒数=等待秒数)
+        if self.同用户循环等待:
+            片段 = await self.循环等待(event, 等待秒数=等待秒数)
+        else:
+            片段 = await self.等待收集新消息(event, 等待秒数=等待秒数)
         if not 片段:
             return
         消息数 = len(片段)
@@ -129,9 +138,11 @@ class 消息补获(Star):
             self,
             event: AstrMessageEvent,
             等待秒数:int | float | None = None,
-            只收集本人:bool | None= None
-    ) -> list[str]:
-        """核心方法，等待新消息"""
+            只收集本人:bool | None= None,
+            循环收集:bool = False
+    ) -> list[str] | tuple[bool, list[str]]:
+        """核心方法，等待新消息
+        如果循环收集=True，那么会返回两个值，否则原样返回一个值，不影响旧调用"""
         if 等待秒数 is None:
             等待秒数 = self.自动等待秒数
         if 只收集本人 is None:
@@ -180,7 +191,10 @@ class 消息补获(Star):
             try:
                 最后事件位置 = -1
                 if not (会话事件列表 := self.消息缓存.get(umo)):
-                    return []  # 期间没有收到新消息
+                    if 循环收集:
+                        return False, []  # 期间没有收到新消息
+                    else:
+                        return []
                 片段 = []
                 # 查找本次事件在列表里的位置
                 本次事件位置 = -1
@@ -193,29 +207,68 @@ class 消息补获(Star):
                     if p_event.get_extra(会话已唤醒键):
                         break  # 已唤醒及之后的消息都会在下一轮llm处理
                     最后事件位置 += 1 # 要删除的已使用的事件的位置，这个赋值后的值就是p_event在列表里的索引位置
+                    if p_event.is_stopped():
+                        if p_event.get_extra(会话主动停止键, False):
+                            if 循环收集:
+                                return True, 片段
+                            else:
+                                pass  # 写个pass也没事，方便知道这是自己的事件，不要continue跳过需要收集
+                        else:
+                            continue
                     if p_event.call_llm or getattr(p_event, "_has_send_oper", False):
                         # event.call_llm的语义被写反了，实际上True是禁止请求llm
                         continue  # 事件已被终止，已被设置禁用llm请求，已发送过消息，这些情况按框架预期都不会请求llm
-                    if p_event.is_stopped() and (not p_event.get_extra(会话主动停止键, False)):
-                        continue
                     if 只收集本人 and (p_event.get_sender_id() != event.get_sender_id()):
                         continue
                     片段.append(f"[{格式化时间(p_event.message_obj.timestamp)}"
                                 f" {p_event.get_sender_name()}({p_event.get_sender_id()})]"
                                 f" {格式化事件(p_event)}")
-                return 片段
+                if 循环收集:
+                    return False, 片段
+                else:
+                    return 片段
             finally:
-                self.会话等待中事件[umo] = None
+                if not 循环收集:
+                    self.会话等待中事件[umo] = None
                 if 最后事件位置 != -1:
                     del self.消息缓存[umo][:最后事件位置+1] # +1包括最后事件本身
 
+    async def 循环等待(
+            self,
+            event: AstrMessageEvent,
+            等待秒数: int | float | None = None,
+            只收集本人: bool | None = None,
+            最大循环时间:int | None = None
+            ):
+        """循环触发等待，适用于一直都是同一个用户连续唤醒"""
+        片段收集 = []
+        if 最大循环时间 is None:
+            最大循环时间 = self.循环等待最大时间
+        开始时间 = time.time()
+        try:
+            while True:
+                需要继续, 片段 = await self.等待收集新消息(event, 等待秒数, 只收集本人, True)
+                片段收集.extend(片段)
+                if not 需要继续:
+                    break
+                if time.time() - 开始时间 > 最大循环时间:
+                    break
+        finally:
+            self.会话等待中事件[event.unified_msg_origin] = None
+        return 片段收集
+
     @filter.llm_tool(name="wait_new_messages")
-    async def wait_new_messages(self, event: AstrMessageEvent, seconds: float = None, scope: str = None) -> str:
+    async def wait_new_messages(
+            self,
+            event: AstrMessageEvent,
+            seconds: float | None = None,
+            scope: str | None = None
+    ) -> str:
         """等待一小段时间，收集群友在你思考/处理期间又发来的消息。
         适用场景：群聊，群友艾特你之后，问题还没问，或只问你在吗，可能即将有需要补充的消息，但是那条消息如果未艾特你的话，并不会被唤醒
         例如：
             @bot 问你一个问题 → 此条唤醒了
-            今天天气怎么样 → 此条可能未唤醒，落空
+            今天天气怎么样 → 此条没有艾特，不会触发唤醒，落空
 
         Args:
             seconds(number): 等待秒数，通常2秒，0~8秒，默认根据配置
@@ -232,7 +285,8 @@ class 消息补获(Star):
             return "无法转换参数seconds的值为浮点数，请检查"
         if not (0 <= 等待秒数 <= 8):  # 0秒也可以，即从请求llm到使用工具期间
             return "seconds等待秒数超出范围"
-        if not str(scope or "").strip():
+        scope = str(scope or "").strip().lower()
+        if scope:
             只收集本人 = self.只收集本人
         elif scope == "user":
             只收集本人 = True

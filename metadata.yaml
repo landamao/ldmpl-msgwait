@@ -1,6 +1,6 @@
 name: 消息补获
 display_name: 消息补获
-version: v1.5.0
-desc: xxx
+version: v1.6.0
+desc: 消息补获，群聊级消息防抖
 author: 懒大猫
 repo: https://github.com/landamao/ldmpl-msgwait
