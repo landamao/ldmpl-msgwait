@@ -169,6 +169,7 @@ class 消息补获(Star):
             消息链 = event_.get_messages()
 
             def 遍历消息链(消息链_) -> str:
+                logger.debug(消息链_)
                 p = []
                 for 组件 in 消息链_:
                     if isinstance(组件, Reply):
@@ -225,7 +226,7 @@ class 消息补获(Star):
                     if 只收集本人 and (p_event.get_sender_id() != event.get_sender_id()):
                         continue
                     片段.append(f"[{格式化时间(p_event.message_obj.timestamp)}"
-                                f" {p_event.get_sender_name()}({p_event.get_sender_id()})]"
+                                f" {p_event.get_sender_name()}({p_event.get_sender_id()})]:"
                                 f" {格式化事件(p_event)}")
                 if 循环收集:
                     return 需要继续, 片段
