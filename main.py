@@ -148,6 +148,7 @@ class 消息补获(Star):
         if 只收集本人 is None:
             只收集本人 = self.只收集本人
         umo = event.unified_msg_origin
+        self_id = event.get_self_id()
         self.会话等待中事件[umo] = event
         self.会话有新唤醒[umo] = False
         loop = asyncio.get_running_loop()
@@ -175,7 +176,11 @@ class 消息补获(Star):
                     elif isinstance(组件, Plain):
                         p.append(str(组件.text or ""))
                     elif isinstance(组件, At):
-                        p.append(f" {组件.name}({组件.qq}) ")
+                        qq = str(组件.qq or "")
+                        if qq == self_id:
+                            p.append(f" @{组件.name}(yourself) ")
+                        else:
+                            p.append(f" @{组件.name}({qq}) ")
                     elif isinstance(组件, Image):
                         p.append(f" [图片或表情: {组件.url}] ")
                     ...
@@ -203,16 +208,15 @@ class 消息补获(Star):
                         本次事件位置 = idx
                         break
                 最后事件位置 = 本次事件位置 # 找到就用该索引+1遍历，找不到就相当于已经全是新事件了，-1仍然正确
+                需要继续 = False
                 for p_event in 会话事件列表[本次事件位置+1:]:
                     if p_event.get_extra(会话已唤醒键):
                         break  # 已唤醒及之后的消息都会在下一轮llm处理
                     最后事件位置 += 1 # 要删除的已使用的事件的位置，这个赋值后的值就是p_event在列表里的索引位置
                     if p_event.is_stopped():
                         if p_event.get_extra(会话主动停止键, False):
-                            if 循环收集:
-                                return True, 片段
-                            else:
-                                pass  # 写个pass也没事，方便知道这是自己的事件，不要continue跳过需要收集
+                            # 这是被本插件合并掉的事件：照常收集，遍历结束后再决定是否继续循环等待
+                            需要继续 = True
                         else:
                             continue
                     if p_event.call_llm or getattr(p_event, "_has_send_oper", False):
@@ -224,7 +228,7 @@ class 消息补获(Star):
                                 f" {p_event.get_sender_name()}({p_event.get_sender_id()})]"
                                 f" {格式化事件(p_event)}")
                 if 循环收集:
-                    return False, 片段
+                    return 需要继续, 片段
                 else:
                     return 片段
             finally:
